@@ -20,7 +20,7 @@ var (
 
 	starting = make(chan struct{})
 	done     = make(chan struct{})
-	notify   = make(chan struct{}, 10)
+	notify   = make(chan struct{})
 
 	mu            sync.Mutex
 	running       *exec.Cmd
@@ -28,11 +28,6 @@ var (
 )
 
 func main() {
-	if args := os.Getenv("LIVE_EXEC_CHILD"); args != "" {
-		become(args)
-		panic("unreachable")
-	}
-
 	flag.Parse()
 
 	if *build == "" && *run == "" {
@@ -74,9 +69,8 @@ func main() {
 }
 
 //
-// because not all platforms support pdeathsig, we spawn ourselves again as
-// a helper process that listens on stdin from the parent. if stdin is ever
-// closed for any reason, we kill the child and exit ourselves.
+// command launches the command in such a way that if its stdin is closed, the
+// child is killed.
 //
 
 func command(args string) (*exec.Cmd, io.Closer) {
@@ -85,42 +79,11 @@ func command(args string) (*exec.Cmd, io.Closer) {
 		panic(err)
 	}
 
-	cmd := exec.Command(os.Args[0], "child-monitor")
+	cmd := exec.Command("bash", "-c",
+		fmt.Sprintf("(%s)& (read)& wait -n; kill $(jobs -p)", args))
 	cmd.Stdin = pr
-	cmd.Env = append(os.Environ(), fmt.Sprintf("LIVE_EXEC_CHILD=%s", args))
-	setProcAttr(cmd.SysProcAttr)
 
 	return cmd, pw
-}
-
-func become(args string) {
-	cmd := exec.Command("sh", "-c", args)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	setProcAttr(cmd.SysProcAttr)
-
-	if err := cmd.Start(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-
-	// TODO: there has to be a way to kill the whole process group by spawning
-	// the command in bash or something.
-
-	go func() {
-		os.Stdin.Read(make([]byte, 1))
-		cmd.Process.Kill()
-		os.Exit(0)
-	}()
-
-	if err := cmd.Wait(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	os.Exit(0)
-
-	panic("unreachable")
 }
 
 //
@@ -158,7 +121,6 @@ func wait(cmd *exec.Cmd) {
 	defer mu.Unlock()
 
 	fmt.Printf("--- process exited with pid: %d\n", cmd.Process.Pid)
-
 	if cmd != running {
 		return
 	}
@@ -198,6 +160,7 @@ func watch() {
 //
 
 func signaled() {
+	fmt.Println("--- modification detected...")
 	time.Sleep(*coalesceSleep)
 
 	starting <- struct{}{}
