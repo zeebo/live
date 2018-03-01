@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
+
+	"github.com/zeebo/errs"
 )
 
 var (
@@ -15,31 +18,66 @@ var (
 	run        = flag.String("run", "", "run command")
 	quiescence = flag.Duration("quiescence", 100*time.Millisecond,
 		"quiescence period after a change before triggering build")
-
-	starting = make(chan struct{})
-	done     = make(chan struct{})
-	notify   = make(chan struct{})
-
-	running      *exec.Cmd
-	running_done = make(chan struct{})
 )
 
-func main() {
-	flag.Parse()
+func logf(format string, args ...interface{}) {
+	fmt.Printf("--- %s\n", fmt.Sprintf(format, args...))
+}
 
+func main() {
+	_, err := exec.LookPath("fswatch")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: fswatch must be available")
+		os.Exit(1)
+	}
+
+	flag.Parse()
 	if *build == "" && *run == "" {
+		fmt.Fprintln(os.Stderr, "error: must specify run and/or build.")
 		flag.Usage()
 		os.Exit(1)
 	}
 
-	attempt()
+	for {
+		if err := attemptBuild(); err == nil {
+			startRun()
+		}
 
-	go watch()
+		for {
+			if err := notify(); err == nil {
+				break
+			}
+			time.Sleep(time.Second)
+		}
+	}
+}
 
-	var (
-		timer   *time.Timer
-		waiting bool
-	)
+func notify() error {
+	cmd := exec.Command("fswatch", *dir)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return errs.Wrap(err)
+	}
+	if err := cmd.Start(); err != nil {
+		return errs.Wrap(err)
+	}
+	defer cmd.Wait()
+	defer cmd.Process.Kill()
+
+	errors := make(chan error, 1)
+	change := make(chan struct{})
+	timer := (*time.Timer)(nil)
+
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			if strings.Contains(scanner.Text(), "/_") {
+				continue
+			}
+			change <- struct{}{}
+		}
+		errors <- errs.Wrap(scanner.Err())
+	}()
 
 	for {
 		var timer_ch <-chan time.Time
@@ -48,94 +86,72 @@ func main() {
 		}
 
 		select {
-		case <-timer_ch:
-			fmt.Println("--- quiescence reached")
-			go attempt()
-			timer = nil
-			waiting = false
-
-		case <-notify:
-			if !waiting {
-				fmt.Println("--- modification detected...")
-				waiting = true
-			}
+		case err := <-errors:
 			if timer != nil {
 				timer.Stop()
+			}
+			logf("fswatch error: %v", err)
+			return err
+
+		case <-timer_ch:
+			logf("quiesence reached")
+			return nil
+
+		case <-change:
+			if timer != nil {
+				timer.Stop()
+			} else {
+				logf("change noticed")
 			}
 			timer = time.NewTimer(*quiescence)
 		}
 	}
 }
 
-func watch() {
-	cmd := exec.Command("fswatch", *dir)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		panic(err)
-	}
-	if err := cmd.Start(); err != nil {
-		panic(err)
-	}
-	lines := bufio.NewScanner(stdout)
-	for lines.Scan() {
-		select {
-		case notify <- struct{}{}:
-		default:
-			fmt.Println("--- missed notification")
-		}
-	}
-	if err := lines.Err(); err != nil {
-		panic(err)
-	}
-	panic("fswatch exited unexpectedly")
+func command(arg string) *exec.Cmd {
+	cmd := exec.Command(arg)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(), "LIVE=yes")
+	return cmd
 }
 
-func attempt() {
-	if err := attemptBuild(); err != nil {
-		return
-	}
-	attemptRun()
-}
-
-func attemptBuild() (err error) {
+func attemptBuild() error {
 	if *build == "" {
 		return nil
 	}
-
-	fmt.Println("--- attempting build...")
-	cmd := exec.Command(*build)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	logf("starting build...")
+	defer logf("build finished")
+	return command(*build).Run()
 }
 
-func attemptRun() {
+var (
+	running *exec.Cmd
+	done    = make(chan struct{})
+)
+
+func startRun() {
 	if *run == "" {
 		return
 	}
 
-	fmt.Println("--- attempting run...")
-	cmd := exec.Command(*run)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
 	if running != nil {
-		fmt.Printf("--- killing old process pid: %d\n", running.Process.Pid)
+		logf("killing old run with pid=%d...", running.Process.Pid)
 		running.Process.Kill()
 		running.Wait()
-		<-running_done
 		running = nil
+		<-done
 	}
 
-	if err := cmd.Start(); err != nil {
-		fmt.Printf("--- error starting process: %+v\n", err)
-	} else {
-		fmt.Printf("--- process started with pid: %d\n", cmd.Process.Pid)
-		running = cmd
+	cmd := command(*run)
+	logf("starting run...")
+	if err := cmd.Start(); err == nil {
+		logf("run started with pid=%d", cmd.Process.Pid)
 		go func() {
 			cmd.Wait()
-			fmt.Printf("--- process exited with pid: %d\n", cmd.Process.Pid)
-			running_done <- struct{}{}
+			logf("run finished with pid=%d", cmd.Process.Pid)
+			done <- struct{}{}
 		}()
+		running = cmd
 	}
 }
