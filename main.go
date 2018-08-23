@@ -108,8 +108,8 @@ func notify() error {
 	}
 }
 
-func command(arg string) *exec.Cmd {
-	cmd := exec.Command(arg)
+func command(prog string, args ...string) *exec.Cmd {
+	cmd := exec.Command(prog, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = append(os.Environ(), "LIVE=yes")
@@ -117,12 +117,13 @@ func command(arg string) *exec.Cmd {
 }
 
 func attemptBuild() error {
-	if *build == "" {
+	parts := strings.Fields(*build)
+	if len(parts) == 0 {
 		return nil
 	}
 	logf("starting build...")
 	defer logf("build finished")
-	return command(*build).Run()
+	return command(parts[0], parts[1:]...).Run()
 }
 
 var (
@@ -131,7 +132,8 @@ var (
 )
 
 func startRun() {
-	if *run == "" {
+	parts := strings.Fields(*run)
+	if len(parts) == 0 {
 		return
 	}
 
@@ -143,7 +145,7 @@ func startRun() {
 		<-done
 	}
 
-	cmd := command(*run)
+	cmd := command(parts[0], parts[1:]...)
 	logf("starting run...")
 	if err := cmd.Start(); err == nil {
 		logf("run started with pid=%d", cmd.Process.Pid)
