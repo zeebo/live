@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"os"
@@ -9,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zeebo/errs"
+	"github.com/cespare/fswatch"
 )
 
 var (
-	dir        = flag.String("dir", "", "watched directory")
+	dir        = flag.String("dir", ".", "watched directory")
 	build      = flag.String("build", "", "build command")
 	run        = flag.String("run", "", "run command")
 	quiescence = flag.Duration("quiescence", 100*time.Millisecond,
@@ -25,16 +24,16 @@ func logf(format string, args ...interface{}) {
 }
 
 func main() {
-	_, err := exec.LookPath("fswatch")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error: fswatch must be available")
-		os.Exit(1)
-	}
-
 	flag.Parse()
 	if *build == "" && *run == "" {
 		fmt.Fprintln(os.Stderr, "error: must specify run and/or build.")
 		flag.Usage()
+		os.Exit(1)
+	}
+
+	evs, errs, err := fswatch.Watch(*dir, *quiescence)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "fswatch error: %v", err)
 		os.Exit(1)
 	}
 
@@ -43,67 +42,15 @@ func main() {
 			startRun()
 		}
 
+	events:
 		for {
-			if err := notify(); err == nil {
-				break
+			select {
+			case <-evs:
+				break events
+			case err := <-errs:
+				logf("watch error: %v", err)
 			}
 			time.Sleep(time.Second)
-		}
-	}
-}
-
-func notify() error {
-	cmd := exec.Command("fswatch", *dir)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return errs.Wrap(err)
-	}
-	if err := cmd.Start(); err != nil {
-		return errs.Wrap(err)
-	}
-	defer cmd.Wait()
-	defer cmd.Process.Kill()
-
-	errors := make(chan error, 1)
-	change := make(chan struct{})
-	timer := (*time.Timer)(nil)
-
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			if strings.Contains(scanner.Text(), "/_") {
-				continue
-			}
-			change <- struct{}{}
-		}
-		errors <- errs.Wrap(scanner.Err())
-	}()
-
-	for {
-		var timer_ch <-chan time.Time
-		if timer != nil {
-			timer_ch = timer.C
-		}
-
-		select {
-		case err := <-errors:
-			if timer != nil {
-				timer.Stop()
-			}
-			logf("fswatch error: %v", err)
-			return err
-
-		case <-timer_ch:
-			logf("quiesence reached")
-			return nil
-
-		case <-change:
-			if timer != nil {
-				timer.Stop()
-			} else {
-				logf("change noticed")
-			}
-			timer = time.NewTimer(*quiescence)
 		}
 	}
 }

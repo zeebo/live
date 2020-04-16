@@ -1,3 +1,5 @@
 module github.com/zeebo/live
 
-require github.com/zeebo/errs v0.2.0
+go 1.14
+
+require github.com/cespare/fswatch v0.0.3
