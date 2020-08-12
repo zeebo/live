@@ -33,7 +33,7 @@ func main() {
 
 	evs, errs, err := fswatch.Watch(*dir, *quiescence)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "fswatch error: %v", err)
+		fmt.Fprintf(os.Stderr, "fswatch error: %v\n", err)
 		os.Exit(1)
 	}
 
