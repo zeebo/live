@@ -85,9 +85,11 @@ func startRun() {
 	}
 
 	if running != nil {
-		logf("killing old run with pid=%d...", running.Process.Pid)
-		running.Process.Kill()
-		running.Wait()
+		if !running.ProcessState.Exited() {
+			logf("killing old run with pid=%d...", running.Process.Pid)
+			running.Process.Kill()
+			running.Wait()
+		}
 		running = nil
 		<-done
 	}
